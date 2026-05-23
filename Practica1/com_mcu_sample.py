@@ -43,7 +43,8 @@ def enviar_comando(conexion: serial.Serial, comando: str) -> str | None:
 
     print("Timeout: sin respuesta al comando.")
     return None
-
+arduino-cli compile --fqbn esp32:esp32:esp32 esp32_firmware/ && \
+arduino-cli upload --fqbn esp32:esp32:esp32 --port /dev/ttyUSB0 esp32_firmware/
 
 # ---------------------------------------------------------------------------
 # PARÁMETROS DE LA ONDA AM

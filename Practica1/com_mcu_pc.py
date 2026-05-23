@@ -1,91 +1,269 @@
 import serial
 import time
 import numpy as np
-import math
+import matplotlib.pyplot as plt
+import threading
 
-PUERTO = '/dev/ttyUSB0'
-BAUDRATE = 115200
-TIMEOUT = 2  # seconds to wait for a response
+# CONFIG SERIAL
+PUERTO   = '/dev/ttyUSB0'
+BAUDRATE = 230400
 
-def verificar_conexion(conexion: serial.Serial) -> bool:
-    """
-    Sends a PING to the ESP32 and waits for a PONG response.
-    The ESP32 firmware must respond with 'PONG' when it receives 'PING'.
-    """
-    print("Verificando conexión con el ESP32...")
-    conexion.write("PING\n".encode('utf-8'))
-    
-    tiempo_inicio = time.time()
-    while (time.time() - tiempo_inicio) < TIMEOUT:
+# PARAMETROS AM
 
-        # Se verifica si hay bytes esperando en el bufer de entrada de la computadora.
-        if conexion.in_waiting > 0:
-            respuesta = conexion.readline().decode('utf-8').strip()
+
+# Amplitudes
+AMPLITUD_PORTADORA  = 110
+AMPLITUD_MODULADORA = 90
+
+# Frecuencias
+FRECUENCIA_PORTADORA = 20   # Hz
+FRECUENCIA_MODULADORA = 2   # Hz
+
+# Offset DAC
+OFFSET = 120
+
+# Tasa envio DAC
+SAMPLE_RATE = 500
+
+# Tiempo transmisión
+DURACION = 5
+
+# VARIABLES GLOBALES
+
+muestras_adc = []
+
+capturando = True
+
+
+# VERIFICAR LA CONEXION
+
+def verificar_conexion(conn):
+
+    conn.reset_input_buffer()
+
+    conn.write(b"PING\n")
+
+    t0 = time.time()
+
+    while time.time() - t0 < 2:
+
+        if conn.in_waiting:
+
+            respuesta = conn.readline().decode().strip()
+
             if respuesta == "PONG":
-                print("✓ Conexión verificada: ESP32 respondió correctamente.")
+
+                print("✓ ESP32 conectado")
+
                 return True
-            else:
-                print(f"Respuesta inesperada: '{respuesta}'")
-    
-    print("✗ Sin respuesta del ESP32. Verifique la conexión.")
+
     return False
 
+# HILO RECEPTOR ADC
+def recibir_adc(conn):
 
-def enviar_comando(conexion: serial.Serial, comando: str) -> str | None:
-    """
-    Sends a command and waits for a response.
-    Returns the response text or None if timeout.
-    """
-    conexion.write(f"{comando}\n".encode('utf-8'))
-    print(f"Comando enviado: '{comando}'")
-    
-    tiempo_inicio = time.time()
-    while (time.time() - tiempo_inicio) < TIMEOUT:
-        if conexion.in_waiting > 0:
-            return conexion.readline().decode('utf-8').strip()
-    
-    print("Timeout: sin respuesta al comando.")
-    return None
+    global muestras_adc
+    global capturando
 
+    while capturando:
 
-def enviar_onda_seno(conn, cycles=3, steps=100, delay=0.02):
-    """Sends a sine wave as individual PWM values from the PC."""
-    print("Enviando onda seno...")
-    for i in range(steps * cycles):
-        angle = (2 * np.pi * i) / steps
-        value = int((np.sin(angle) + 1) * 127.5)  # maps 0-255
-        #value = 3.3*np.sin(angle)
-        # Send without waiting for response — keeps timing tight
-        conn.write(f"SET_PWM:{value}\n".encode('utf-8'))
-        conn.flush()
+        if conn.in_waiting:
 
-        
-        time.sleep(delay)
-    #conn.write("SET_PWM:0\n".encode('utf-8'))
-    #conn.flush()
-    print("Onda seno completada.")
+            try:
 
+                linea = conn.readline().decode().strip()
+
+                try:
+
+                    valor = float(linea)
+
+                    muestras_adc.append(valor)
+
+                except:
+                    pass
+
+            except:
+                pass
+
+# TRANSMITIR ONDA AM
+def transmitir_am(conn):
+
+    Ac = AMPLITUD_PORTADORA
+    Am = AMPLITUD_MODULADORA
+
+    fc = FRECUENCIA_PORTADORA
+    fm = FRECUENCIA_MODULADORA
+
+    fs = SAMPLE_RATE
+
+    offset = OFFSET
+
+    total_muestras = int(DURACION * fs)
+
+    t = np.linspace(
+        0,
+        DURACION,
+        total_muestras,
+        endpoint=False
+    )
+
+  
+    # FORMULA AM
+    s = offset + Ac * (
+        1 + (Am / Ac) * np.sin(2*np.pi*fm*t)
+    ) * np.sin(2*np.pi*fc*t)
+
+    valores = np.clip(s, 0, 255).astype(int)
+
+    print("\n========================================")
+    print("TRANSMITIENDO AM")
+    print("========================================")
+    print(f"fc = {fc} Hz")
+    print(f"fm = {fm} Hz")
+    print(f"Ac = {Ac}")
+    print(f"Am = {Am}")
+    print(f"fs = {fs}")
+    print("========================================\n")
+
+    for v in valores:
+
+        comando = f"SET_PWM:{v}\n"
+
+        conn.write(comando.encode())
+
+        time.sleep(1/fs)
+
+    conn.write(b"SET_PWM:0\n")
+
+    print("✓ Transmisión completada")
+
+# GRAFICA TEMPORAL
+
+def graficar_tiempo(muestras, fs_adc):
+
+    t = np.arange(len(muestras)) / fs_adc
+
+    plt.figure(figsize=(12,5))
+
+    plt.plot(t, muestras)
+
+    # Para ver mejor la AM
+    plt.xlim(0, 2)
+
+    plt.title("Señal recibida ADC")
+
+    plt.xlabel("Tiempo [s]")
+
+    plt.ylabel("Voltaje [V]")
+
+    plt.grid()
+
+# FFT
+def graficar_fft(muestras, fs_adc):
+
+    N = len(muestras)
+
+    yf = np.fft.fft(muestras)
+
+    xf = np.fft.fftfreq(N, 1/fs_adc)
+
+    magnitud = np.abs(yf) / N
+
+    mitad = N // 2
+
+    plt.figure(figsize=(12,5))
+
+    plt.plot(xf[:mitad], magnitud[:mitad])
+
+    plt.title("Transformada de Fourier")
+
+    plt.xlabel("Frecuencia [Hz]")
+
+    plt.ylabel("Magnitud")
+
+    plt.grid()
+
+    plt.xlim(0, 60)
+
+# MAIN
 try:
-    conexion_serial = serial.Serial(PUERTO, BAUDRATE, timeout=1)
-    time.sleep(2)  # Wait for ESP32 to boot after reset 
 
-    #if verificar_conexion(conexion_serial):
-    #    respuesta = enviar_comando(conexion_serial, "PING")
-    #    if respuesta:
-    #        print(f"Respuesta del ESP32: '{respuesta}'")
-    
-    if verificar_conexion(conexion_serial):
-        #respuesta = enviar_comando(conexion_serial, "PING")
-        enviar_onda_seno(conexion_serial, cycles=3, steps=100, delay=0.02)
+    conexion = serial.Serial(
+        PUERTO,
+        BAUDRATE,
+        timeout=0.01
+    )
+
+    # Esperar reinicio ESP32
+    time.sleep(2)
+   
+    # VERIFICAR CONEXION
+    if verificar_conexion(conexion):
+
+       
+        # ACTIVAR ADC
+        conexion.write(b"START_ADC\n")
+
+        time.sleep(0.2)
+
+        print("✓ ADC streaming activado")
+
+        # HILO ADC
+
+        hilo_adc = threading.Thread(
+            target=recibir_adc,
+            args=(conexion,)
+        )
+
+        hilo_adc.start()
+
+        # TRANSMISION AM
+        transmitir_am(conexion)
+
+        time.sleep(1)
+
+        # DETENER ADC
+        capturando = False
+
+        conexion.write(b"STOP_ADC\n")
+
+        hilo_adc.join()
+
+        print(f"\nMuestras ADC capturadas: {len(muestras_adc)}")
+
+        # CONVERTIR A NUMPY
+        muestras = np.array(muestras_adc)
+
+        # ELIMINAR OFFSET DC
+        muestras = muestras - np.mean(muestras)
+
+        # fs ADC APROX
+
+        # delayMicroseconds(200)
+        # envio 1 de cada 10 muestras
+
+        fs_adc = 500
+
+        # GRAFICAS
+        graficar_tiempo(muestras, fs_adc)
+
+        graficar_fft(muestras, fs_adc)
+
+        plt.show()
 
     else:
-        print("No respuesta")
 
+        print("✗ No hubo respuesta del ESP32")
 
-except serial.SerialException as error:
-    print(f"Error al abrir el puerto serial: {error}")
+except Exception as e:
+
+    print("ERROR:", e)
 
 finally:
-    if 'conexion_serial' in locals() and conexion_serial.is_open:
-        conexion_serial.close()
-        print("Puerto serial cerrado.")
+
+    try:
+        conexion.close()
+    except:
+        pass
+
+    print("Puerto serial cerrado")
