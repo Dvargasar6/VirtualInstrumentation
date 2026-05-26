@@ -30,7 +30,7 @@ BAUDRATE = 230400
 # Parametros AM (deben coincidir con el transmisor)
 AMPLITUD_PORTADORA  = 60
 AMPLITUD_MODULADORA = 60
-FRECUENCIA_PORTADORA  = 60   # fc [Hz]
+FRECUENCIA_PORTADORA  = 30   # fc [Hz]
 FRECUENCIA_MODULADORA = 10   # fm [Hz]
 OFFSET                = 120  # nivel DC en escala DAC (0-255)
 
@@ -233,6 +233,7 @@ def hilo_transmisor(conn):
         # Tiempo real desde el inicio. Esto es lo que define la frecuencia
         # de la senal generada, independiente de la regularidad del loop.
         t = time.perf_counter() - t0
+        #t = np.linspace(0,100,1000)
 
         moduladora = np.sin(2 * np.pi * fm * t)
         portadora  = np.sin(2 * np.pi * fc * t)
@@ -291,9 +292,14 @@ def main():
 
     # Lineas principales: las creamos una vez y solo actualizamos sus datos.
     # Esto es mucho mas eficiente que axs[i].clear() + axs[i].plot() por frame.
-    linea_am,        = axs[0].plot([], [], lw=0.8, color='steelblue')
+    # Plot 0: senal cruda + envolvente superpuesta en rojo translucido
+    linea_am,        = axs[0].plot([], [], lw=1.0, color='steelblue',
+                                    alpha=0.7, label='Senal AM')
+    linea_envolvente,= axs[0].plot([], [], lw=1.8, color='crimson',
+                                    alpha=0.9, label='Envolvente')
+    axs[0].legend(loc='upper right', fontsize=8, framealpha=0.9)
     linea_fft_am,    = axs[1].plot([], [], lw=1.0, color='coral')
-    linea_demod,     = axs[2].plot([], [], lw=1.0, color='mediumseagreen')
+    linea_demod,     = axs[2].plot([], [], lw=1.2, color='mediumseagreen')
     linea_fft_demod, = axs[3].plot([], [], lw=1.0, color='mediumpurple')
 
     # Frecuencias teoricas (basadas en las constantes globales)
@@ -367,6 +373,24 @@ def main():
 
     # ----- Loop principal de actualizacion -----
     INTERVALO_PLOT = 0.1                   # 10 Hz de refresco
+
+    # Variables para fijar los Y de los 4 plots tras una calibracion inicial.
+    # Estrategia: durante los primeros TIEMPO_CALIB_Y segundos despues de tener
+    # buffer lleno, acumulamos estadisticas. Tras eso, fijamos los limites y
+    # no los volvemos a cambiar. Esto permite ver visualmente cuando la senal
+    # desaparece (al bloquear el acople optico) porque los limites quedan
+    # anclados al rango "normal" de operacion.
+    TIEMPO_CALIB_Y = 2.0                   # segundos para calibrar Y
+    SEMIRANGO_AM   = 1.0                   # +/- 1.0 V alrededor de la media
+    FACTOR_MARGEN  = 1.5                   # tope = pico_observado * este factor
+    t_inicio_calib = None                  # se setea cuando llega el primer frame
+    y_calibrado    = False                 # flag: ya fijamos los limites
+    y_am_min       = None                  # limites finales del plot AM (tiempo)
+    y_am_max       = None
+    y_demod_lim    = None                  # limite +/- para plot demodulada (tiempo)
+    y_fft_am_max   = None                  # tope del eje Y de la FFT AM
+    y_fft_demod_max= None                  # tope del eje Y de la FFT demodulada
+
     try:
         while True:
             with buffer_lock:
@@ -392,16 +416,73 @@ def main():
             xf_demod, mag_demod = calcular_fft(demodulada,  fs_medida)
 
             # ----- Actualizacion de plots (set_data, sin clear) -----
+            # Plot 0: senal AM cruda + envolvente. La envolvente se obtiene
+            # de la misma demodulacion ya calculada, pero RE-AGREGANDO la media
+            # original que le quitamos a las muestras_ac. Asi la envolvente
+            # queda visualmente centrada sobre la senal cruda en V reales.
+            media_actual = muestras.mean()
+            envolvente_visual = demodulada + media_actual
             linea_am.set_data(t_axis, muestras)
+            linea_envolvente.set_data(t_axis, envolvente_visual)
             axs[0].set_xlim(0, t_axis[-1])
-            axs[0].set_ylim(muestras.min() - 0.05, muestras.max() + 0.05)
+
+            # Calibracion de Y (solo durante los primeros segundos).
+            # Los 4 plots se fijan al mismo tiempo: tiempo AM, tiempo demodulada,
+            # FFT AM y FFT demodulada. Asi al bloquear el acople optico se ve
+            # de forma consistente como las cuatro graficas pierden la senal.
+            if not y_calibrado:
+                if t_inicio_calib is None:
+                    t_inicio_calib = time.perf_counter()
+                elif time.perf_counter() - t_inicio_calib >= TIEMPO_CALIB_Y:
+                    # ----- Calibracion completada: fijar los 4 ejes Y -----
+
+                    # Plot 0 (AM tiempo): +/- SEMIRANGO_AM volts alrededor de la media
+                    y_am_min = media_actual - SEMIRANGO_AM
+                    y_am_max = media_actual + SEMIRANGO_AM
+                    axs[0].set_ylim(y_am_min, y_am_max)
+
+                    # Plot 2 (demodulada tiempo): +/- (pico * factor) alrededor de 0
+                    # Si la senal desaparece, el ruido residual quedara como
+                    # una linea casi plana en el centro del eje
+                    pico_demod_t = np.max(np.abs(demodulada))
+                    y_demod_lim  = max(pico_demod_t * FACTOR_MARGEN, 0.1)
+                    axs[2].set_ylim(-y_demod_lim, y_demod_lim)
+
+                    # Plot 1 (FFT AM): tope = pico maximo en la ventana visible
+                    # multiplicado por el factor de margen. La mascara restringe
+                    # la busqueda al rango fc +/- margen_am para ignorar artefactos
+                    # de baja frecuencia fuera de la zona de interes.
+                    mask_calib_am = (xf_am >= fc - margen_am) & (xf_am <= fc + margen_am)
+                    pico_fft_am   = mag_am[mask_calib_am].max() if mask_calib_am.any() else 0.0
+                    y_fft_am_max  = max(pico_fft_am * FACTOR_MARGEN, 0.01)
+                    axs[1].set_ylim(0, y_fft_am_max)
+
+                    # Plot 3 (FFT demodulada): igual logica que la FFT AM
+                    mask_calib_dm  = (xf_demod >= 0) & (xf_demod <= margen_demod)
+                    pico_fft_demod = mag_demod[mask_calib_dm].max() if mask_calib_dm.any() else 0.0
+                    y_fft_demod_max= max(pico_fft_demod * FACTOR_MARGEN, 0.01)
+                    axs[3].set_ylim(0, y_fft_demod_max)
+
+                    y_calibrado = True
+                    print(f"Y AM tiempo  fijado en [{y_am_min:.3f}, {y_am_max:.3f}] V")
+                    print(f"Y demod      fijado en +/- {y_demod_lim:.3f}")
+                    print(f"Y FFT AM     fijado en [0, {y_fft_am_max:.4f}]")
+                    print(f"Y FFT demod  fijado en [0, {y_fft_demod_max:.4f}]")
+                else:
+                    # Durante la calibracion: Y dinamico provisional en plot 0
+                    axs[0].set_ylim(muestras.min() - 0.05, muestras.max() + 0.05)
+            # Despues de calibrar: NO tocar mas el ylim del plot 0
 
             linea_fft_am.set_data(xf_am, mag_am)
-            # Ylim dinamico sobre la ventana visible (ignorar picos fuera)
+            # Ylim dinamico solo durante calibracion; despues queda fijo.
             mask_am = (xf_am >= fc - margen_am) & (xf_am <= fc + margen_am)
-            if mask_am.any():
+            if not y_calibrado and mask_am.any():
                 ymax_am = mag_am[mask_am].max() * 1.20
                 axs[1].set_ylim(0, ymax_am if ymax_am > 0 else 1)
+                ymax_label = ymax_am               # para posicionar etiquetas
+            else:
+                # Tras calibrar, las etiquetas se posicionan respecto al tope fijo
+                ymax_label = y_fft_am_max if y_fft_am_max is not None else 1.0
 
             # Deteccion de los tres picos del AM y calculo de errores
             # Ventana de busqueda = fm/2 para evitar que los picos vecinos
@@ -415,11 +496,11 @@ def main():
                     # Usamos set_xdata con secuencia para axvline (matplotlib lo exige).
                     vlines_reales_am[i].set_xdata([f_real, f_real])
                     vlines_reales_am[i].set_visible(True)
-                    textos_reales_am[i].set_position((f_real, ymax_am * 0.95))
+                    textos_reales_am[i].set_position((f_real, ymax_label * 0.95))
                     textos_reales_am[i].set_text(f"{f_real:.2f} Hz")
                     textos_reales_am[i].set_visible(True)
                     # Reposicionar etiqueta teorica al tope del plot
-                    textos_teoricos_am[i].set_position((f_teo, ymax_am * 0.05))
+                    textos_teoricos_am[i].set_position((f_teo, ymax_label * 0.05))
                     # Error porcentual relativo al valor teorico
                     err_pct = 100.0 * (f_real - f_teo) / f_teo
                     errores_am.append(err_pct)
@@ -440,14 +521,21 @@ def main():
 
             linea_demod.set_data(t_axis, demodulada)
             axs[2].set_xlim(0, t_axis[-1])
-            axs[2].set_ylim(demodulada.min() * 1.1 - 0.01,
-                            demodulada.max() * 1.1 + 0.01)
+            # Y fijo despues de calibracion; dinamico durante la calibracion.
+            if not y_calibrado:
+                axs[2].set_ylim(demodulada.min() * 1.1 - 0.01,
+                                demodulada.max() * 1.1 + 0.01)
+            # Despues de calibrar: NO tocar mas el ylim del plot 2
 
             linea_fft_demod.set_data(xf_demod, mag_demod)
             mask_demod = (xf_demod >= 0) & (xf_demod <= margen_demod)
-            if mask_demod.any():
+            # Ylim dinamico solo durante calibracion; despues queda fijo.
+            if not y_calibrado and mask_demod.any():
                 ymax_demod = mag_demod[mask_demod].max() * 1.20
                 axs[3].set_ylim(0, ymax_demod if ymax_demod > 0 else 1)
+                ymax_demod_label = ymax_demod
+            else:
+                ymax_demod_label = y_fft_demod_max if y_fft_demod_max is not None else 1.0
 
             # Deteccion del pico de fm. Ventana = fm/2 para no confundir
             # con armonicos o residuos cerca de cero.
@@ -456,10 +544,10 @@ def main():
             if f_real_demod is not None:
                 vline_real_demod.set_xdata([f_real_demod, f_real_demod])
                 vline_real_demod.set_visible(True)
-                texto_real_demod.set_position((f_real_demod, ymax_demod * 0.95))
+                texto_real_demod.set_position((f_real_demod, ymax_demod_label * 0.95))
                 texto_real_demod.set_text(f"{f_real_demod:.2f} Hz")
                 texto_real_demod.set_visible(True)
-                texto_teorico_demod.set_position((fm, ymax_demod * 0.05))
+                texto_teorico_demod.set_position((fm, ymax_demod_label * 0.05))
                 err_demod = 100.0 * (f_real_demod - fm) / fm
                 axs[3].set_title(
                     f"FFT demodulada | teorico: {fm} Hz "
