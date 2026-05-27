@@ -41,22 +41,25 @@ void setup() {
     
 }
 
-int contador_envio = 0;
+// Contador eliminado: ahora enviamos en cada iteracion (decimacion = 1).
+// La tasa de envio queda controlada solo por delayMicroseconds en loop().
 
 void loop() {
     // ADC
     if (streamingADC) {
-        //Lectura ADC RAW (0-4095) y envío por Serial
+        // Lectura ADC RAW (0-4095). Se envia el entero directo, NO el voltaje
+        // convertido a float. Razones:
+        //   1. Menos caracteres por mensaje (max 4 vs ~6-9) -> mas throughput UART.
+        //   2. Sin perdida de precision por formateo de float (println(float)
+        //      redondea a 2 decimales por defecto en Arduino).
+        //   3. Mas rapido en el ESP32: evita la division en punto flotante.
+        // La conversion a voltios (adc * 3.3 / 4095) se hace en Python.
         int adc_value = analogRead(ADC_PIN);
-        float voltaje = adc_value * (3.3 / 4095.0);
-        // SUMAREMOS EN EL CONTADOR
-        contador_envio++;
-        //Enviar solo 1 se cada 10 muestras
-        if (contador_envio >= 10) {
-            Serial.println(voltaje);
-            contador_envio = 0;
-        }
-        delayMicroseconds(200); // 20 kHz aprox
+        Serial.println(adc_value);
+        // Delay de 500 us: fija un periodo objetivo de ~500 us por iteracion
+        // (~2000 Hz teoricos). La tasa real medida sera menor por el overhead
+        // del UART y de analogRead, tipicamente ~1500-1800 Hz.
+        delayMicroseconds(500);
     }
     if (Serial.available() > 0) {
         String command = Serial.readStringUntil('\n');
@@ -64,7 +67,7 @@ void loop() {
         if (command.length() > 0) {
             processCommand(command);
         }
-    
+
     }
 
 }

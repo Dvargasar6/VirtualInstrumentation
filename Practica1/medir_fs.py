@@ -30,13 +30,22 @@ BAUDRATE = 230400
 # Parametros AM (deben coincidir con el transmisor)
 AMPLITUD_PORTADORA  = 60
 AMPLITUD_MODULADORA = 60
-FRECUENCIA_PORTADORA  = 30   # fc [Hz]
-FRECUENCIA_MODULADORA = 10   # fm [Hz]
+FRECUENCIA_PORTADORA  = 40   # fc [Hz]
+FRECUENCIA_MODULADORA = 5   # fm [Hz]
 OFFSET                = 120  # nivel DC en escala DAC (0-255)
 
-# Buffer circular. 1024 muestras a ~385 Hz = ~2.66 s de ventana.
-# Resolucion FFT = fs/N = 385/1024 = 0.376 Hz/bin (sobra para separar 70/80/90 Hz).
-BUFFER_SIZE = 1024
+# Constantes del ADC del ESP32. El firmware envia el valor crudo (0-4095)
+# y aqui hacemos la conversion a voltios. Esto es mas eficiente que enviar
+# floats por UART (menos bytes, mas muestras por segundo).
+ADC_MAX     = 4095            # 12 bits del ADC del ESP32
+ADC_VREF    = 3.3             # tension de referencia en voltios
+ADC_FACTOR  = ADC_VREF / ADC_MAX   # se precalcula para no dividir por muestra
+
+# Buffer circular. Tamano elegido para mantener ~2-3 s de ventana temporal
+# independientemente de la fs. A fs~1500 Hz, 4096 muestras = ~2.7 s, suficiente
+# para ver ~27 ciclos de la moduladora de 10 Hz. La resolucion FFT correspondiente
+# es fs/N ~= 0.37 Hz/bin, suficiente para separar fc, fc-fm y fc+fm.
+BUFFER_SIZE = 4096
 buffer_adc  = deque(maxlen=BUFFER_SIZE)
 buffer_lock = threading.Lock()
 
@@ -63,7 +72,10 @@ def medir_fs(conn, duracion=3.0):
         if not linea:
             continue
         try:
-            float(linea)
+            # El firmware ahora envia entero ADC (0-4095), no float.
+            # int() rechaza strings con punto decimal: util para detectar
+            # si hay un firmware antiguo conectado por error.
+            int(linea)
             n += 1
         except ValueError:
             pass
@@ -195,9 +207,12 @@ def hilo_lector(conn):
             linea = conn.readline().decode(errors='ignore').strip()
             if not linea:
                 continue
-            valor = float(linea)
+            # El firmware envia entero ADC (0-4095). Convertimos a voltios aqui
+            # multiplicando por la constante precalculada ADC_FACTOR = 3.3/4095.
+            adc_raw = int(linea)
+            voltaje = adc_raw * ADC_FACTOR
             with buffer_lock:
-                buffer_adc.append(valor)
+                buffer_adc.append(voltaje)
         except ValueError:
             pass
         except Exception as e:
@@ -233,7 +248,6 @@ def hilo_transmisor(conn):
         # Tiempo real desde el inicio. Esto es lo que define la frecuencia
         # de la senal generada, independiente de la regularidad del loop.
         t = time.perf_counter() - t0
-        #t = np.linspace(0,100,1000)
 
         moduladora = np.sin(2 * np.pi * fm * t)
         portadora  = np.sin(2 * np.pi * fc * t)
