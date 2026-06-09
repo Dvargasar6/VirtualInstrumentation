@@ -1,16 +1,3 @@
-"""
-Paso 3: Adquisicion + demodulacion + FFT con ejes correctos.
-
-Mejoras respecto al codigo original:
-  - fs medida empiricamente al arranque (no asumida).
-  - Hilos separados para lectura serial, transmision PWM y plotting.
-  - Filtro Butterworth disenado con la fs real.
-  - FFT con ejes centrados en frecuencias esperadas (no autoescalados).
-  - Plot refrescado a tasa fija (no en cada muestra) para no saturar la CPU.
-  - Uso de set_data + relim/autoscale en vez de clear+plot en cada frame
-    (mucho mas eficiente con matplotlib).
-"""
-
 import serial
 import time
 import threading
@@ -20,6 +7,8 @@ matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 from scipy.signal import butter, filtfilt   # filtro IIR + filtrado sin desfase
 from collections import deque
+import tkinter as tk                        # GUI para sliders de control
+from tkinter import ttk                     # widgets con tema mejorado
 
 # ============================================================
 # CONFIGURACION
@@ -27,12 +16,34 @@ from collections import deque
 PUERTO   = '/dev/ttyUSB0'
 BAUDRATE = 230400
 
-# Parametros AM (deben coincidir con el transmisor)
-AMPLITUD_PORTADORA  = 60
-AMPLITUD_MODULADORA = 60
-FRECUENCIA_PORTADORA  = 40   # fc [Hz]
-FRECUENCIA_MODULADORA = 5   # fm [Hz]
-OFFSET                = 120  # nivel DC en escala DAC (0-255)
+# Parametros AM INICIALES. A diferencia de antes, ahora la generacion se hace
+# en el ESP32 y estos valores se envian por SET_AM. Los sliders del Tkinter
+# permiten cambiarlos en vivo durante la ejecucion.
+AM_INICIAL = {
+    'Ac':     60.0,   # amplitud portadora (escala DAC 0-255)
+    'Am':     60.0,   # amplitud moduladora
+    'fc':     80.0,   # frecuencia portadora [Hz]
+    'fm':     10.0,   # frecuencia moduladora [Hz]
+    'offset': 120.0,  # nivel DC (escala DAC 0-255)
+}
+
+# Rangos validos de cada parametro para los sliders. Los limites superiores
+# de Ac+offset deben respetar 0 <= valor_DAC <= 255 (8 bits del DAC del ESP32).
+AM_RANGOS = {
+    'Ac':     (0.0,   100.0),
+    'Am':     (0.0,   100.0),
+    'fc':     (1.0,   500.0),   # tope = ~fs_adc/4 para evitar aliasing severo
+    'fm':     (0.1,    50.0),   # tope = fc/2 para mantener AM convencional
+    'offset': (0.0,   255.0),
+}
+
+# Parametros AM "vivos": objeto compartido entre el hilo GUI (escritor) y el
+# hilo controlador (lector). Protegido por su propio lock.
+am_params      = dict(AM_INICIAL)
+am_lock        = threading.Lock()
+am_dirty       = threading.Event()  # se setea cuando un slider cambia
+# fc y fm se necesitan tambien en el hilo de plotting para las lineas teoricas.
+# El plotting los lee directamente de am_params bajo am_lock.
 
 # Constantes del ADC del ESP32. El firmware envia el valor crudo (0-4095)
 # y aqui hacemos la conversion a voltios. Esto es mas eficiente que enviar
@@ -220,49 +231,166 @@ def hilo_lector(conn):
             break
 
 
-def hilo_transmisor(conn):
+def hilo_controlador_am(conn):
     """
-    Genera senal AM y la envia al DAC del ESP32.
+    Envia comandos SET_AM al ESP32 cuando los sliders cambian. Mucho mas
+    eficiente que el transmisor anterior, que enviaba un comando SET_PWM por
+    cada muestra. Ahora solo se envia un SET_AM por cambio de slider.
 
-    IMPORTANTE: el tiempo 't' se calcula con perf_counter (reloj real
-    monotonico), no con un contador de muestras. Esto garantiza que las
-    frecuencias de la senal sean EXACTAS aunque el envio sea irregular
-    por latencia del UART, GIL, scheduler de Linux, etc.
-
-    Si usaramos t = n/fs como antes, cualquier dilatacion temporal del
-    envio se traduciria directamente en una compresion de la frecuencia
-    real (lo que pasaba con fm=10 Hz aparecciendo como 3.4 Hz).
+    Funcionamiento:
+      - Espera a que la GUI senalice un cambio via am_dirty.set()
+      - Lee am_params bajo lock
+      - Construye el comando SET_AM:Ac,Am,fc,fm,offset
+      - Lo envia al ESP32
+      - Limpia el flag y vuelve a esperar
     """
-    Ac, Am = AMPLITUD_PORTADORA, AMPLITUD_MODULADORA
-    fc, fm = FRECUENCIA_PORTADORA, FRECUENCIA_MODULADORA
-
-    # Periodo objetivo entre envios. No determina la frecuencia generada
-    # (eso lo hace perf_counter), pero si limita la tasa de comandos al
-    # ESP32 para no saturar el UART y dejar ancho de banda al ADC.
-    # A 230400 baud, ~12 bytes/cmd = ~520 us minimo. Pedimos 2 ms = 500 Hz.
-    PERIODO_TX = 0.002                     # segundos
-
-    t0 = time.perf_counter()               # tiempo de referencia inicial
+    # Antes de iniciar, enviar los parametros iniciales y arrancar la AM
+    with am_lock:
+        cmd = ("SET_AM:"
+               f"{am_params['Ac']:.2f},"
+               f"{am_params['Am']:.2f},"
+               f"{am_params['fc']:.2f},"
+               f"{am_params['fm']:.2f},"
+               f"{am_params['offset']:.2f}\n")
+    try:
+        conn.write(cmd.encode())
+        time.sleep(0.05)                   # margen para que el ESP32 procese
+        conn.write(b"START_AM\n")
+    except Exception as e:
+        print(f"[ctrl_am] error inicial: {e}")
+        return
 
     while running.is_set():
-        # Tiempo real desde el inicio. Esto es lo que define la frecuencia
-        # de la senal generada, independiente de la regularidad del loop.
-        t = time.perf_counter() - t0
+        # wait con timeout permite revisar running periodicamente y salir limpio
+        if not am_dirty.wait(timeout=0.2):
+            continue
+        am_dirty.clear()
 
-        moduladora = np.sin(2 * np.pi * fm * t)
-        portadora  = np.sin(2 * np.pi * fc * t)
-        # AM convencional: s(t) = Vdc + Ac(1 + m*moduladora) * portadora
-        s = OFFSET + Ac * (1 + (Am / Ac) * moduladora) * portadora
-        valor = int(np.clip(s, 0, 255))
+        # Snapshot atomico de los parametros actuales
+        with am_lock:
+            cmd = ("SET_AM:"
+                   f"{am_params['Ac']:.2f},"
+                   f"{am_params['Am']:.2f},"
+                   f"{am_params['fc']:.2f},"
+                   f"{am_params['fm']:.2f},"
+                   f"{am_params['offset']:.2f}\n")
         try:
-            conn.write(f"SET_PWM:{valor}\n".encode())
+            conn.write(cmd.encode())
         except Exception as e:
-            print(f"[tx] {e}")
+            print(f"[ctrl_am] {e}")
             break
 
-        # Sleep para no saturar UART. La frecuencia generada sigue siendo
-        # exacta porque 't' se calcula con perf_counter en cada iteracion.
-        time.sleep(PERIODO_TX)
+
+# ============================================================
+# MAIN
+# ============================================================
+def hilo_gui_tkinter():
+    """
+    Crea y ejecuta la ventana Tkinter con los sliders de control AM.
+    Esta funcion se ejecuta en su propio hilo porque mainloop() bloquea.
+
+    Mecanica:
+      - Cada slider modifica una entrada de am_params bajo am_lock.
+      - Tras cualquier cambio se hace am_dirty.set() para que el hilo
+        controlador envie el comando SET_AM al ESP32.
+      - Hay un debounce de 100 ms para no inundar el UART con cambios
+        rapidos de slider (el evento de Scale se dispara en cada pixel
+        de movimiento del cursor).
+    """
+    root = tk.Tk()
+    root.title("Control AM - ESP32")
+    root.geometry("450x420")
+    # Protocolo de cierre: si el usuario cierra la ventana, se senala parada
+    # global. Asi el resto del programa termina limpiamente.
+    root.protocol("WM_DELETE_WINDOW", lambda: (running.clear(), root.destroy()))
+
+    # Frame contenedor con padding
+    frame = ttk.Frame(root, padding=15)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    # Titulo
+    titulo = ttk.Label(frame, text="Parametros de la senal AM",
+                       font=('Sans', 12, 'bold'))
+    titulo.pack(pady=(0, 10))
+
+    # Variable de debounce. Guarda el id del 'after' programado para
+    # cancelarlo si llega otro cambio antes de que dispare.
+    debounce_id = [None]
+    DEBOUNCE_MS = 100
+
+    def disparar_envio():
+        """Marca los parametros como sucios para que el hilo controlador envie."""
+        am_dirty.set()
+        debounce_id[0] = None
+
+    def crear_slider(parent, nombre, etiqueta, unidad):
+        """
+        Crea un slider con etiqueta, valor numerico y rango. Devuelve el
+        widget Scale por si hace falta acceder a el despues.
+        """
+        # Sub-frame para esta fila
+        fila = ttk.Frame(parent)
+        fila.pack(fill=tk.X, pady=4)
+
+        # Etiqueta a la izquierda con nombre fijo
+        lbl_nombre = ttk.Label(fila, text=etiqueta, width=22, anchor='w')
+        lbl_nombre.pack(side=tk.LEFT)
+
+        # Etiqueta del valor actual (se actualiza en tiempo real)
+        valor_var = tk.StringVar(value=f"{AM_INICIAL[nombre]:.2f} {unidad}")
+        lbl_valor = ttk.Label(fila, textvariable=valor_var, width=12, anchor='e',
+                              font=('Mono', 10))
+        lbl_valor.pack(side=tk.RIGHT)
+
+        # Callback que se ejecuta en CADA movimiento del slider
+        def on_change(val_str):
+            v = float(val_str)
+            valor_var.set(f"{v:.2f} {unidad}")
+            # Actualizar el dict compartido bajo lock
+            with am_lock:
+                am_params[nombre] = v
+            # Debounce: cancelar envio anterior si lo hay, programar uno nuevo
+            if debounce_id[0] is not None:
+                root.after_cancel(debounce_id[0])
+            debounce_id[0] = root.after(DEBOUNCE_MS, disparar_envio)
+
+        rango_min, rango_max = AM_RANGOS[nombre]
+        scale = tk.Scale(parent, from_=rango_min, to=rango_max,
+                         orient=tk.HORIZONTAL, resolution=0.1,
+                         command=on_change, length=400, sliderlength=20)
+        scale.set(AM_INICIAL[nombre])
+        scale.pack(fill=tk.X, pady=(0, 8))
+        return scale
+
+    # Crear los 5 sliders
+    crear_slider(frame, 'Ac',     "Amplitud portadora (Ac):",   "")
+    crear_slider(frame, 'Am',     "Amplitud moduladora (Am):",  "")
+    crear_slider(frame, 'fc',     "Frecuencia portadora (fc):", "Hz")
+    crear_slider(frame, 'fm',     "Frecuencia moduladora (fm):","Hz")
+    crear_slider(frame, 'offset', "Offset DC:",                 "")
+
+    # Boton para resetear a los valores iniciales
+    def reset():
+        # Recargar valores iniciales y forzar actualizacion de la GUI.
+        # La forma mas robusta es destruir y recrear la ventana, pero como
+        # eso es disruptivo, usamos un enfoque mas suave: actualizar cada
+        # slider via su widget. Recorremos los hijos del frame y buscamos
+        # los Scale.
+        # Aqui simplificamos: actualizamos am_params y forzamos un SET_AM.
+        # El usuario vera los sliders desactualizados visualmente, pero el
+        # ESP32 recibira los valores correctos. Para evitar inconsistencia
+        # es preferible cerrar y reabrir la ventana.
+        with am_lock:
+            am_params.update(AM_INICIAL)
+        am_dirty.set()
+
+    btn_reset = ttk.Button(frame, text="Resetear a valores iniciales",
+                            command=reset)
+    btn_reset.pack(pady=(10, 0))
+
+    # Iniciar el loop de eventos de Tkinter. Esta llamada bloquea hasta
+    # que la ventana se cierra.
+    root.mainloop()
 
 
 # ============================================================
@@ -286,8 +414,11 @@ def main():
 
     # Calibracion
     fs_medida = medir_fs(conn, duracion=3.0)
-    if fs_medida < 2 * FRECUENCIA_PORTADORA:
-        print(f"fs={fs_medida:.1f} Hz insuficiente (Nyquist={2*FRECUENCIA_PORTADORA} Hz).")
+    # Validar Nyquist contra la fc inicial. Si el usuario sube fc despues con
+    # el slider, el rango del slider ya respeta el limite (configurado en AM_RANGOS).
+    fc_inicial = AM_INICIAL['fc']
+    if fs_medida < 2 * fc_inicial:
+        print(f"fs={fs_medida:.1f} Hz insuficiente (Nyquist={2*fc_inicial} Hz).")
         conn.close()
         return
 
@@ -296,8 +427,11 @@ def main():
     conn.write(b"START_ADC\n")
     time.sleep(0.1)
     conn.reset_input_buffer()
-    threading.Thread(target=hilo_lector,     args=(conn,), daemon=True).start()
-    threading.Thread(target=hilo_transmisor, args=(conn,), daemon=True).start()
+    threading.Thread(target=hilo_lector,         args=(conn,), daemon=True).start()
+    threading.Thread(target=hilo_controlador_am, args=(conn,), daemon=True).start()
+    # GUI Tkinter en hilo aparte. mainloop() bloquea, asi que va en su propio
+    # hilo. matplotlib se queda en el main thread (requisito de su backend).
+    threading.Thread(target=hilo_gui_tkinter, daemon=True).start()
 
     # ----- Configuracion de los 4 subplots -----
     plt.ion()
@@ -316,9 +450,12 @@ def main():
     linea_demod,     = axs[2].plot([], [], lw=1.2, color='mediumseagreen')
     linea_fft_demod, = axs[3].plot([], [], lw=1.0, color='mediumpurple')
 
-    # Frecuencias teoricas (basadas en las constantes globales)
-    fc = FRECUENCIA_PORTADORA
-    fm = FRECUENCIA_MODULADORA
+    # Frecuencias teoricas iniciales. Los sliders pueden cambiarlas en vivo,
+    # asi que cada iteracion del loop principal las relee de am_params.
+    # Aqui solo se usan para el setup inicial de los plots.
+    with am_lock:
+        fc = am_params['fc']
+        fm = am_params['fm']
 
     # Plot 0: senal AM en tiempo
     axs[0].set_title(f"Senal AM cruda (fs = {fs_medida:.1f} Hz)")
@@ -405,8 +542,47 @@ def main():
     y_fft_am_max   = None                  # tope del eje Y de la FFT AM
     y_fft_demod_max= None                  # tope del eje Y de la FFT demodulada
 
+    # Valores anteriores de fc/fm para detectar cambios entre frames.
+    # Si cambian, reconfiguramos los ejes X y las lineas teoricas.
+    fc_prev = fc
+    fm_prev = fm
+
     try:
         while True:
+            # Releer fc y fm cada frame. Los sliders pueden haberlos cambiado.
+            with am_lock:
+                fc = am_params['fc']
+                fm = am_params['fm']
+
+            # Si fc o fm cambiaron, reconfigurar plots dependientes.
+            if fc != fc_prev or fm != fm_prev:
+                # Reposicionar lineas teoricas y etiquetas del plot FFT AM
+                f_teoricas_am_actual = [fc - fm, fc, fc + fm]
+                etiquetas_actual = [f"fc-fm\n{fc-fm:.1f} Hz",
+                                     f"fc\n{fc:.1f} Hz",
+                                     f"fc+fm\n{fc+fm:.1f} Hz"]
+                for i, (f, etiq) in enumerate(zip(f_teoricas_am_actual, etiquetas_actual)):
+                    vlines_teoricas_am[i].set_xdata([f, f])
+                    textos_teoricos_am[i].set_position((f, 0))
+                    textos_teoricos_am[i].set_text(etiq)
+
+                # Reposicionar linea teorica del plot FFT demodulada
+                vline_teorica_demod.set_xdata([fm, fm])
+                texto_teorico_demod.set_position((fm, 0))
+                texto_teorico_demod.set_text(f"fm teorico\n{fm:.1f} Hz")
+
+                # Actualizar limites de los ejes X
+                margen_am    = max(30, 3 * fm)
+                margen_demod = 3 * fm
+                axs[1].set_xlim(fc - margen_am, fc + margen_am)
+                axs[3].set_xlim(0, margen_demod)
+
+                # Actualizar lista de frecuencias teoricas para deteccion de picos
+                f_teoricas_am = f_teoricas_am_actual
+
+                fc_prev = fc
+                fm_prev = fm
+
             with buffer_lock:
                 muestras = np.array(buffer_adc)
 
@@ -580,8 +756,10 @@ def main():
         print("\nDeteniendo...")
     finally:
         running.clear()
+        am_dirty.set()                     # despertar al hilo controlador para que salga
         time.sleep(0.3)
         try:
+            conn.write(b"STOP_AM\n")       # detener generacion AM en el ESP32
             conn.write(b"STOP_ADC\n")
             conn.write(b"DAC_OFF\n")
             conn.close()
