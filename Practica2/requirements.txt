@@ -1,0 +1,6 @@
+# Dependencias de Python para la Practica 2 (lado PC).
+# Instalar preferiblemente dentro de un entorno virtual (ver README.md).
+pyserial>=3.5
+PyQt6>=6.5
+pyqtgraph>=0.13
+numpy>=1.24
