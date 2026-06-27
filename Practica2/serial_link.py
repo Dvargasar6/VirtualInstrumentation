@@ -16,7 +16,8 @@ import threading                  # Para el hilo lector en segundo plano
 import time
 import serial                     # pyserial: acceso al puerto serie
 import serial.tools.list_ports    # Para enumerar los puertos serie del sistema
-
+# queue.Queue es una cola FIFO segura entre hilos, con bloqueo opcional
+import queue
 
 def listar_puertos():
     """
@@ -35,6 +36,10 @@ class SerialLink:
         self._lock = threading.Lock()     # Protege el acceso a la ultima lectura
         # Ultima lectura recibida: tupla (tipo, valor, duty, t_recepcion) o None
         self._latest = None
+        # Cola de comandos pendientes de enviar al ESP32. La rellena enviar()
+        # desde el hilo principal y la drena el hilo lector antes de cada lectura.
+        # Asi todo acceso a self._ser ocurre en un unico hilo.
+        self._tx_queue = queue.Queue()
 
     def conectar(self, puerto, baudios=115200, timeout=1.0):
         """
@@ -72,16 +77,17 @@ class SerialLink:
 
     def enviar(self, comando):
         """
-        Envia un comando de texto al ESP32 anadiendo el salto de linea final.
-        Si el puerto no esta abierto, no hace nada.
+        Encola un comando para que el hilo lector lo escriba al ESP32.
+        No accede directamente al puerto serie: solo deposita el comando en
+        la cola, lo cual es seguro entre hilos. Si el puerto no esta abierto,
+        no hace nada.
         """
         if self.conectado():
-            try:
-                # encode() convierte el texto a bytes; el firmware espera ASCII + '\n'
-                self._ser.write((comando + "\n").encode("ascii"))
-            except (serial.SerialException, OSError):
-                pass  # Si el puerto se cae al escribir, lo ignoramos silenciosamente
-
+            print(f"[TX] {comando!r}", flush=True)   # Depuracion temporal
+            # put() es seguro entre hilos. Sin argumentos adicionales, encola
+            # inmediatamente sin bloquear (la cola no tiene tope de tamano).
+            self._tx_queue.put(comando)
+            
     def ultima_lectura(self):
         """
         Devuelve la ultima lectura recibida como (tipo, valor, duty, t) o None.
@@ -97,20 +103,53 @@ class SerialLink:
     #  Metodos internos (ejecutados por el hilo lector)
     # ----------------------------------------------------------------------
     def _bucle_lectura(self):
-        """Bucle del hilo: lee lineas y actualiza la ultima lectura."""
+        """
+        Bucle del hilo lector. Es el unico hilo que accede a self._ser, tanto
+        para leer como para escribir. El hilo principal de Qt deposita los
+        comandos en self._tx_queue mediante enviar(); este bucle los drena
+        aqui antes de cada lectura, garantizando que nunca haya dos hilos
+        tocando pyserial simultaneamente.
+        """
+        buffer = bytearray()  # Acumulador de bytes hasta encontrar saltos de linea
         while self._running:
+            # ---- 1) Drenamos la cola de comandos pendientes de envio ----
+            # get_nowait() saca un elemento sin bloquear; lanza queue.Empty
+            # cuando la cola se vacia, momento en el que rompemos el bucle.
+            while True:
+                try:
+                    comando = self._tx_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    # Escribimos el comando seguido de salto de linea, como
+                    # exige el firmware. Esta es la unica llamada a write() en
+                    # todo el codigo, y ocurre en este hilo, no en el de Qt.
+                    self._ser.write((comando + "\n").encode("ascii"))
+                except (serial.SerialException, OSError):
+                    pass   # Si el puerto se cae al escribir, ignoramos silenciosamente
+            # ---- 2) Leemos bytes disponibles sin bloquear ----
             try:
-                # readline() lee bytes hasta encontrar '\n' o agotar el timeout.
-                # decode() los pasa a texto; errors='ignore' descarta bytes invalidos.
-                linea = self._ser.readline().decode("ascii", errors="ignore").strip()
+                n = self._ser.in_waiting   # Numero de bytes en el buffer del kernel
+                if n > 0:
+                    buffer.extend(self._ser.read(n))
+                else:
+                    # Sin datos: dormimos 5 ms para ceder el hilo y no quemar CPU
+                    time.sleep(0.005)
+                    continue
             except (serial.SerialException, OSError):
-                break   # Si el puerto se cae, salimos del hilo
-            if not linea:
-                continue
-            self._procesar_linea(linea)
+                break   # Puerto cerrado o cable desconectado: salimos del hilo
+            # ---- 3) Extraemos lineas completas del buffer ----
+            while b'\n' in buffer:
+                idx = buffer.index(b'\n')
+                linea_bytes = bytes(buffer[:idx])
+                del buffer[:idx + 1]
+                linea = linea_bytes.decode("ascii", errors="ignore").strip()
+                if linea:
+                    self._procesar_linea(linea)
 
     def _procesar_linea(self, linea):
         """Interpreta una linea de telemetria del ESP32 y guarda el dato util."""
+        print(f"[RX] Nueva {linea!r}", flush=True) 
         partes = linea.split(",")
         # Telemetria valida: "T,<valor>,<duty>" o "V,<valor>,<duty>"
         if len(partes) == 3 and partes[0] in ("T", "V"):
@@ -122,4 +161,7 @@ class SerialLink:
                 return   # Linea malformada: la descartamos
             with self._lock:
                 self._latest = (tipo, valor, duty, time.perf_counter())
+            #print(f"[RX-OK] tipo={tipo} valor={valor} duty={duty}")
+        else:
+            print(f"[RX-RAW] {linea!r}")
         # Las lineas "READY" y "PONG" no llevan dato de medida; aqui se ignoran.

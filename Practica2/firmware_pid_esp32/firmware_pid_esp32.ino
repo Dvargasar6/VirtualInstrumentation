@@ -41,7 +41,7 @@ const int PIN_ENC_B    = 33;  // Canal B del encoder (no se usa en el lazo; opci
 const int      PWM_RES_BITS = 10;                      // Resolucion de la PWM en bits
 const uint32_t PWM_MAX      = (1 << PWM_RES_BITS) - 1; // Cuentas maximas: 2^10 - 1 = 1023
 const uint32_t FREQ_TEMP    = 15;                      // 15 Hz para la planta termica (rango 10-20 Hz)
-const uint32_t FREQ_MOT     = 10000;                   // 10 kHz para el motor (rango 5-20 kHz)
+const uint32_t FREQ_MOT     = 1000;                   // 10 kHz para el motor (rango 5-20 kHz)
 
 // ---------------------------------------------------------------------------
 //  Parametros del encoder
@@ -50,12 +50,12 @@ const uint32_t FREQ_MOT     = 10000;                   // 10 kHz para el motor (
 // Incluye la relacion de reduccion de la caja. ESTE VALOR DEBE CALIBRARSE
 // para tu motor concreto (ver explicacion en el mensaje). El valor de abajo
 // es solo un punto de partida tipico para un N20 de 250 RPM.
-const float PULSES_PER_REV = 350.0f;
+const float PULSES_PER_REV = 207.0f;
 
 // ---------------------------------------------------------------------------
 //  Temporizacion de muestreo / telemetria
 // ---------------------------------------------------------------------------
-const uint32_t SAMPLE_MS = 20;   // Cada 20 ms se mide y se envia telemetria (50 Hz)
+const uint32_t SAMPLE_MS = 50;   // Cada 20 ms se mide y se envia telemetria (50 Hz)
 
 // ---------------------------------------------------------------------------
 //  Estado de operacion
@@ -195,12 +195,25 @@ void procesarComando(String cmd) {
   else if (cmd == "PING") {
     Serial.println("PONG");
   }
+    else if (cmd == "PCOUNT") {
+    // Lectura atomica: deshabilitamos interrupciones para leer el contador
+    // sin que la ISR lo modifique en mitad de la operacion.
+    noInterrupts();
+    uint32_t n = contadorPulsos;   // Copia local del valor protegido
+    interrupts();
+    Serial.print("PCOUNT,");       // Prefijo identificador del mensaje
+    Serial.println(n);             // Imprime el numero y termina con '\n'
+  }
 }
 
 // ============================================================================
 //  Configuracion inicial (se ejecuta una sola vez al arrancar)
 // ============================================================================
 void setup() {
+  // Amplia el buffer de transmision del UART para evitar bloqueos por
+  // backpressure si el PC tarda momentaneamente en drenar la telemetria.
+  // Por defecto son 256 bytes; 2048 bytes dan margen para ~120 lineas.
+  Serial.setTxBufferSize(2048);
   Serial.begin(115200);             // UART0 sobre USB hacia el PC, 115200 baudios
 
   // --- Pines de salida digital ---

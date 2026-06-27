@@ -59,8 +59,7 @@ No hace falta instalar drivers del conversor USB-serie: los módulos `cp210x`
     arduino-cli core install esp32:esp32
 
     arduino-cli board list                                                   # localiza el puerto, p.ej. /dev/ttyUSB0
-    arduino-cli compile --fqbn esp32:esp32:esp32 firmware_pid_esp32
-    arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 firmware_pid_esp32
+    arduino-cli compile --fqbn esp32:esp32:esp32 firmware_pid_esp32 && arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 firmware_pid_esp32
 
 Si la subida no arranca, mantén pulsado el botón BOOT de la placa al empezar.
 
