@@ -39,6 +39,13 @@ Alternativa con paquetes del sistema (si prefieres no usar venv):
 Instala PyQt6 (no PyQt5): el código usa enumerados encapsulados propios de PyQt6
 y pyqtgraph detecta automáticamente el binding instalado.
 
+Alternativa usando Conda:
+
+    conda create -n pid_env python=3.11  
+    conda activate pid_env              
+    pip install -r requirements.txt    
+    
+
 ### Lado microcontrolador (firmware)
 
 Necesitas `arduino-cli` (desde el AUR: `paru -S arduino-cli`) y el núcleo del

@@ -94,6 +94,13 @@ void IRAM_ATTR isrEncoder() {
 //  Aplica el ciclo de trabajo (0..100 %) al pin PWM del subsistema activo
 //  y apaga el subsistema inactivo por seguridad.
 // ============================================================================
+// ============================================================================
+//  Aplica el ciclo de trabajo (0..100 %) al pin PWM del subsistema activo.
+//  IMPORTANTE: esta funcion se llama en la ruta caliente, una vez por cada
+//  comando DUTY (~20 Hz). Por eso solo debe tocar el canal del modo ACTIVO.
+//  El apagado del canal inactivo se hace UNA sola vez al cambiar de modo
+//  (en procesarComando), no aqui, para no invocar ledcWrite() de mas.
+// ============================================================================
 void aplicarDuty(float dutyPct) {
   // Saturacion de seguridad: el duty siempre queda dentro de [0, 100]
   if (dutyPct < 0.0f)   dutyPct = 0.0f;
@@ -104,15 +111,15 @@ void aplicarDuty(float dutyPct) {
   // El + 0.5 sirve para redondear al entero mas cercano al truncar.
   uint32_t cuentas = (uint32_t)((dutyPct / 100.0f) * PWM_MAX + 0.5f);
 
+  // Solo escribimos el canal del modo activo. Una unica llamada a ledcWrite
+  // por invocacion, en lugar de dos. El canal inactivo ya quedo en 0 al
+  // entrar en este modo desde procesarComando().
   if (modoActual == MODO_TEMP) {
     ledcWrite(PIN_PWM_TEMP, cuentas);  // PWM a la base del TIP122
-    ledcWrite(PIN_PWM_MOT, 0);         // Aseguramos el motor apagado
   } else {
     ledcWrite(PIN_PWM_MOT, cuentas);   // PWM a IN1 del DRV8833
-    ledcWrite(PIN_PWM_TEMP, 0);        // Aseguramos la resistencia apagada
   }
 }
-
 // ============================================================================
 //  Lee el LM35 promediando varias muestras del ADC y devuelve grados Celsius.
 //  analogReadMilliVolts() lee el ADC en crudo y le aplica la calibracion de
@@ -170,10 +177,12 @@ void procesarComando(String cmd) {
     char m = cmd.charAt(5);          // Caracter inmediatamente despues de "MODE,"
     if (m == 'T') {
       modoActual = MODO_TEMP;
-      aplicarDuty(0.0f);             // Al cambiar de modo, apagamos por seguridad
+      ledcWrite(PIN_PWM_MOT, 0);     // Apagamos el canal del motor UNA vez
+      aplicarDuty(0.0f);             // Y ponemos el canal termico a 0
     } else if (m == 'V') {
       modoActual = MODO_VEL;
-      aplicarDuty(0.0f);
+      ledcWrite(PIN_PWM_TEMP, 0);    // Apagamos el canal termico UNA vez
+      aplicarDuty(0.0f);             // Y ponemos el canal del motor a 0
       noInterrupts();
       contadorPulsos = 0;            // Empezamos la medida de RPM desde cero
       interrupts();
