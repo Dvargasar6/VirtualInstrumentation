@@ -1,0 +1,10 @@
+# --- GUI web (arquitectura actual: server.py + index.html) ---
+pyserial>=3.5            # Acceso al puerto serie y enumeracion de puertos
+pyserial-asyncio>=0.6    # Capa asyncio sobre pyserial usada por server.py
+fastapi>=0.110           # Framework web del backend
+uvicorn[standard]>=0.27  # Servidor ASGI que ejecuta el backend FastAPI
+
+# --- GUI de escritorio PyQt (gui.py) ---
+PyQt6>=6.5
+pyqtgraph>=0.13
+numpy>=1.24

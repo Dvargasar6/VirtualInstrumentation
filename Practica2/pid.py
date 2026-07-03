@@ -19,19 +19,23 @@ class PID:
     def __init__(self, kp=0.0, ki=0.0, kd=0.0,
                  setpoint=0.0, out_min=0.0, out_max=100.0,
                  deriv_tau=0.05):
-        # Ganancias del controlador
+        # Ganancias del controlador:
         self.kp = kp
         self.ki = ki
         self.kd = kd
-        # Referencia (consigna) deseada: TR en C o RPMR en RPM
-        self.setpoint = setpoint
-        # Limites de saturacion de la salida (ciclo de trabajo, en %)
+
+        # Referencia:
+        self.setpoint = setpoint  # Referencia
+
+        # Limites de saturacion de la salida (ciclo de trabajo, en %):
         self.out_min = out_min
         self.out_max = out_max
+
         # Constante de tiempo del filtro derivativo, en segundos.
         # Cuanto mayor es deriv_tau, mas suave (mas filtrada) es la derivada.
         self.deriv_tau = deriv_tau
-        # Inicializa el estado interno
+
+        # Inicializa el estado interno:
         self.reset()
 
     def reset(self):
@@ -54,39 +58,34 @@ class PID:
           p, i, d : las tres componentes por separado (utiles para graficar).
         """
         if dt <= 0.0:
-            dt = 1e-3   # Proteccion ante un dt invalido (evita dividir por cero)
+            dt = 1e-3   # Evita dividir por cero
 
-        # 1) Error actual: diferencia entre la referencia y la medida
-        error = self.setpoint - measurement
 
-        # 2) Accion proporcional: reacciona al error presente
+        error = self.setpoint - measurement  # Error actual
+
+        # Accion proporcional: reacciona al error presente
         p = self.kp * error
 
-        # 3) Accion integral: acumula el error a lo largo del tiempo
+        # Accion integral: acumula el error a lo largo del tiempo
         self._integral += error * dt
         i = self.ki * self._integral
 
-        # 4) Accion derivativa sobre el error, con filtro pasa-bajos
+        # Accion derivativa con filtro pasa-bajos:
         if self._first_run:
             # En la primera muestra no hay error previo valido: derivada = 0
             raw_deriv = 0.0
             self._first_run = False
         else:
             raw_deriv = (error - self._prev_error) / dt
+
         # Filtro de primer orden discreto:
-        #   alpha = dt / (tau + dt)   (entre 0 y 1)
-        #   con tau grande -> alpha pequeno -> mas filtrado (mas suave)
         alpha = dt / (self.deriv_tau + dt)
         self._deriv_filtered += alpha * (raw_deriv - self._deriv_filtered)
         d = self.kd * self._deriv_filtered
 
-        # 5) Salida sin saturar (suma de las tres acciones)
+        # Salida:
         u = p + i + d
 
-        # 6) Saturacion con anti-windup por integracion condicional.
-        #    Si la salida se sale del rango, la recortamos al limite y, si el
-        #    error empuja en la misma direccion de la saturacion, deshacemos el
-        #    ultimo incremento del integral para que no crezca sin control.
         if u > self.out_max:
             u = self.out_max
             if error > 0.0:
@@ -96,7 +95,8 @@ class PID:
             if error < 0.0:
                 self._integral -= error * dt
 
-        # 7) Guardamos el error actual para calcular la derivada en la siguiente llamada
-        self._prev_error = error
+
+        # Guardar el error actual para la accion derivativa:
+        self._prev_error = error 
 
         return u, p, i, d
