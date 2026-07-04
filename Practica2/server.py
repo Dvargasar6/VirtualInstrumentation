@@ -36,7 +36,7 @@ import serial.tools.list_ports
 
 # FastAPI: framework web ligero con soporte nativo de WebSocket.
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 
 # Reutilizamos el controlador PID existente, sin cambios.
 from pid import PID
@@ -352,6 +352,18 @@ async def raiz():
     # se sirve una vez al cargar la pagina, no en cada actualizacion.
     with open("index.html", "r", encoding="utf-8") as f:
         return f.read()
+
+
+@app.get("/styles.css")
+async def styles_css():
+    """Sirve la hoja de estilos separada del index.html."""
+    return FileResponse("styles.css", media_type="text/css")
+
+
+@app.get("/app.js")
+async def app_js():
+    """Sirve el script del cliente separado del index.html."""
+    return FileResponse("app.js", media_type="application/javascript")
 
 
 @app.get("/puertos")
