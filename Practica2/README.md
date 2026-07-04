@@ -16,7 +16,9 @@ Hay dos interfaces equivalentes para operar el sistema: una **aplicación web**
     ├── firmware_pid_esp32/
     │   └── firmware_pid_esp32.ino   Firmware del ESP32
     ├── server.py                    Backend web (FastAPI + pyserial-asyncio)
-    ├── index.html                   Frontend web (Chart.js + WebSocket)
+    ├── index.html                   Frontend web: marcado (Chart.js + WebSocket)
+    ├── styles.css                   Frontend web: hoja de estilos
+    ├── app.js                       Frontend web: lógica del cliente
     ├── pid.py                       Controlador PID
     ├── gui.py                       GUI de escritorio PyQt6
     ├── serial_link.py               Enlace serie con hilo lector (usado por gui.py)
