@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Control LED RGB — Práctica 3</title>
+  <!-- Technical typefaces: Chakra Petch for labels, IBM Plex Mono for readouts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="instrument">
+
+    <!-- ================= Header: title + serial connection ================ -->
+    <header class="head">
+      <div>
+        <p class="eyebrow">Instrumentación virtual · Práctica 3</p>
+        <h1>Control LED RGB</h1>
+      </div>
+      <div class="conn">
+        <label for="port-select">Puerto USB</label>
+        <select id="port-select"></select>
+        <button id="btn-refresh" class="btn ghost" title="Actualizar lista de puertos">&#8635;</button>
+        <button id="btn-connect" class="btn">Conectar</button>
+        <span id="conn-lamp" class="lamp off" title="Estado de conexión"></span>
+      </div>
+    </header>
+
+    <!-- ============================ Tab strip ============================= -->
+    <nav class="tabs">
+      <button class="tab active" data-panel="panel-hall">Sensor Hall</button>
+      <button class="tab" data-panel="panel-lm35">Sensor de temperatura</button>
+    </nav>
+
+    <!-- ========================= Hall sensor panel ======================== -->
+    <section id="panel-hall" class="panel active">
+      <div class="col">
+        <div class="readout-block">
+          <span class="label">Voltaje sensor Hall</span>
+          <div class="readout"><span id="vhall">--.--</span><small>V</small></div>
+        </div>
+        <div class="readout-block">
+          <span class="label">KY-036 (táctil)</span>
+          <div class="readout"><span id="vky">--.--</span><small>V</small></div>
+        </div>
+        <div class="actions">
+          <button id="btn-start-hall" class="btn">Iniciar Hall</button>
+          <button id="btn-pause-hall" class="btn ghost" disabled>Pausar Hall</button>
+        </div>
+      </div>
+      <div class="col">
+        <div class="lamp-row">
+          <span class="lamp green off" id="lamp-field"></span>
+          <span>Con campo magnético</span>
+        </div>
+        <div class="lamp-row">
+          <span class="lamp red on" id="lamp-nofield"></span>
+          <span>Sin campo magnético</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================== LM35 panel ============================= -->
+    <section id="panel-lm35" class="panel">
+      <div class="col">
+        <div class="readout-block">
+          <span class="label">Temperatura</span>
+          <div class="readout"><span id="temp">--.-</span><small>°C</small></div>
+        </div>
+        <div class="refs">
+          <label>Referencia de temperatura baja
+            <input type="number" id="ref-low" value="20" step="0.5">
+          </label>
+          <label>Referencia de temperatura alta
+            <input type="number" id="ref-high" value="30" step="0.5">
+          </label>
+        </div>
+        <div class="actions">
+          <button id="btn-start-lm35" class="btn">Iniciar LM35</button>
+          <button id="btn-pause-lm35" class="btn ghost" disabled>Pausar LM35</button>
+        </div>
+      </div>
+      <div class="col thermo-col">
+        <!-- Vertical thermometer, 0 to 100 °C as in Fig. 2 of the guide -->
+        <div class="thermometer">
+          <div class="thermo-fill" id="thermo-fill"></div>
+        </div>
+        <div class="thermo-scale"><span>100</span><span>50</span><span>0</span></div>
+        <div class="zones">
+          <div class="lamp-row"><span class="lamp red off"   id="lamp-hot"></span><span>Caliente</span></div>
+          <div class="lamp-row"><span class="lamp blue off"  id="lamp-amb"></span><span>Ambiente</span></div>
+          <div class="lamp-row"><span class="lamp green off" id="lamp-cold"></span><span>Frío</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== Footer: LED, state and STOP =================== -->
+    <footer class="foot">
+      <div class="led-monitor">
+        <span class="label">Color actual del RGB</span>
+        <span id="led-swatch" class="led-swatch"></span>
+        <span id="led-name" class="mono">apagado</span>
+      </div>
+      <div class="state-box">
+        <span class="label">Estado</span>
+        <span id="state-badge" class="mono">IDLE</span>
+      </div>
+      <button id="btn-stop" class="btn stop">STOP</button>
+    </footer>
+
+    <p id="msg" class="msg" role="status"></p>
+  </main>
+
+  <script src="/static/main.js"></script>
+</body>
+</html>
