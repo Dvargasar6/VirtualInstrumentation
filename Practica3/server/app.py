@@ -23,8 +23,8 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 # Control constants
 # ---------------------------------------------------------------------------
-COLOR_COLD    = (0, 255, 0)      # Green  -> "Frio"     (matches Fig. 2 of the guide)
-COLOR_AMBIENT = (0, 0, 255)      # Blue   -> "Ambiente"
+COLOR_COLD    = (0, 0, 255)      # Blue  -> "Frio"     (matches Fig. 2 of the guide)
+COLOR_AMBIENT = (0, 255, 0)      # Green   -> "Ambiente"
 COLOR_HOT     = (255, 0, 0)      # Red    -> "Caliente"
 
 COLOR_FIELD    = (255, 0, 255)   # Magenta when a magnetic field / touch is present

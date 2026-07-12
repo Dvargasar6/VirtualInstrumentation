@@ -37,6 +37,16 @@ unsigned long lastTx = 0;                // Timestamp of the last transmission
 
 String rxBuffer;                         // Accumulates incoming serial bytes
 
+// Average N calibrated ADC reads (mV). The ESP32 ADC is noisy; averaging
+// 16 samples takes ~1.6 ms per channel and removes most of the jitter.
+float readMilliVoltsAvg(int pin, int n = 16) {
+  uint32_t acc = 0;                        // Accumulator for the samples
+  for (int i = 0; i < n; i++) {
+    acc += analogReadMilliVolts(pin);      // Factory-calibrated read in mV
+  }
+  return (float)acc / n;                   // Mean value in mV
+}
+
 // Write an 8-bit duty on each color channel.
 // For a COMMON ANODE LED invert the duty: ledcWrite(CH_R, 255 - r); etc.
 void setRGB(uint8_t r, uint8_t g, uint8_t b) {
@@ -67,9 +77,11 @@ void setup() {
 
   pinMode(PIN_KY_DO, INPUT);             // KY-036 digital line
 
-  // Full-scale attenuation (~0-3.3 V) on every ADC pin used
-  analogSetPinAttenuation(PIN_LM35,  ADC_11db);
-  analogSetPinAttenuation(PIN_HALL,  ADC_11db);
+  // Attenuation per pin. The LM35 outputs 0-500 mV in any realistic range
+  // (0-50 C), a region where the 11 dB setting is inaccurate. ADC_2_5db
+  // limits the range to ~0-1.25 V (0-125 C) with much better resolution.
+  analogSetPinAttenuation(PIN_LM35,  ADC_2_5db);
+  analogSetPinAttenuation(PIN_HALL,  ADC_11db);   // Full scale: line swings 0-3.3 V
   analogSetPinAttenuation(PIN_KY_AO, ADC_11db);
 
   // Configure the three PWM channels and bind them to the LED pins
@@ -100,10 +112,10 @@ void loop() {
   if (now - lastTx >= TX_PERIOD_MS) {
     lastTx = now;
 
-    // analogReadMilliVolts applies the factory ADC calibration and returns mV
-    float tempC = analogReadMilliVolts(PIN_LM35) / 10.0f;    // LM35: 10 mV per Celsius
-    float vHall = analogReadMilliVolts(PIN_HALL) / 1000.0f;  // Line voltage in volts
-    float vKy   = analogReadMilliVolts(PIN_KY_AO) / 1000.0f;
+    // Averaged, factory-calibrated reads (see readMilliVoltsAvg)
+    float tempC = readMilliVoltsAvg(PIN_LM35) / 10.0f;    // LM35: 10 mV per Celsius
+    float vHall = readMilliVoltsAvg(PIN_HALL) / 1000.0f;  // Line voltage in volts
+    float vKy   = readMilliVoltsAvg(PIN_KY_AO) / 1000.0f;
     int   kyDig = digitalRead(PIN_KY_DO);                    // 1 when touch detected
 
     // Build and emit one JSON telemetry line
