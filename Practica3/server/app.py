@@ -27,10 +27,12 @@ COLOR_COLD    = (0, 0, 255)      # Blue  -> "Frio"     (matches Fig. 2 of the gu
 COLOR_AMBIENT = (0, 255, 0)      # Green   -> "Ambiente"
 COLOR_HOT     = (255, 0, 0)      # Red    -> "Caliente"
 
-COLOR_FIELD    = (255, 0, 255)   # Magenta when a magnetic field / touch is present
-COLOR_NO_FIELD = (0, 255, 255)   # Cyan when idle (two-color requirement of the guide)
+COLOR_FIELD    = (255, 0, 255/2)   # Magenta when a magnetic field / touch is present
+COLOR_NO_FIELD = (255, 255/2, 0)   # Cyan when idle (two-color requirement of the guide)
 
 HALL_THRESHOLD_V = 1.0           # 3144 is open collector: line falls near 0 V with field
+KY_THRESHOLD_V   = 1.0           # KY-036 AO falls on touch (~0.54 V measured);
+                                 # any reading below this value counts as a touch.
 
 
 class SerialLink:
@@ -143,11 +145,15 @@ class StateMachine:
             if self.state == "HALL_RUN":
                 vh = tel.get("vh")
                 ky = tel.get("ky", 0)
+                vky = tel.get("vky")
                 if vh is None:
                     return
+                # Touch detected when the KY-036 analog voltage falls below the
+                # software threshold (independent of the module potentiometer).
+                touch = vky is not None and vky < KY_THRESHOLD_V
                 # Field present when the 3144 pulls the line low OR the KY-036
-                # digital output reports a touch (hand approaching).
-                self.field = (vh < HALL_THRESHOLD_V) or (ky == 1)
+                # reports a touch (digital output or analog threshold).
+                self.field = (vh < HALL_THRESHOLD_V) or (ky == 1) or touch
                 self._set_led(COLOR_FIELD if self.field else COLOR_NO_FIELD)
 
             elif self.state == "LM35_RUN":
